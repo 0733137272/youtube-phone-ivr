@@ -74,6 +74,21 @@ app.get('/api/admin/search', async (req, res) => {
   }
 });
 
+app.get('/api/admin/test-download', async (req, res) => {
+  const secret = process.env.API_SECRET;
+  if (secret && req.query.key !== secret) {
+    return res.status(403).send('Forbidden');
+  }
+  const videoId = req.query.video_id || 'Y30pfWIQfoo';
+  try {
+    await ensureDb();
+    const playPath = await processSong(videoId, process.env.YEMOT_TOKEN);
+    res.json({ ok: true, playPath });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Secret check middleware for Yemot endpoint
 app.use('/api/yemot', (req, res, next) => {
   const secret = process.env.API_SECRET;
