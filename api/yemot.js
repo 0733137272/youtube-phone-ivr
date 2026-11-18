@@ -4,6 +4,7 @@ const { downloadRecording, deleteFile } = require('../lib/yemotApi');
 const { transcribeAudio } = require('../lib/groq');
 const { getDb, initDb, searchLocal } = require('../lib/db');
 const { resolveChannel, indexChannel } = require('../lib/youtube');
+const { processSong } = require('../lib/mediaWorker');
 
 const app = express();
 let dbReady = false;
@@ -163,8 +164,56 @@ router.get('/', async (call) => {
       { max_digits: 1, min_digits: 1, digits_allowed: ['1', '2', '3'] }
     );
     if (choice === '1') {
+      const db = getDb();
+      let playPath = song.cached_path;
+
+      if (!playPath) {
+        // Start background download/conversion if not already running
+        const running = await db.execute({
+          sql: `SELECT id FROM jobs WHERE video_id = ? AND status = 'running' LIMIT 1`,
+          args: [song.video_id],
+        });
+        if (running.rows.length === 0) {
+          processSong(song.video_id, token).catch((err) => {
+            console.error('Background processSong error:', err);
+          });
+        }
+
+        // Poll up to 12 times (~60s) with short wait messages
+        for (let attempt = 0; attempt < 12; attempt++) {
+          await call.read(
+            [{ type: 'text', data: 'אנא המתינו, השיר בהכנה' }],
+            'tap',
+            { max_digits: 1, min_digits: 0, sec_wait: 4 }
+          );
+          const check = await db.execute({
+            sql: `SELECT cached_path FROM videos WHERE video_id = ? LIMIT 1`,
+            args: [song.video_id],
+          });
+          if (check.rows[0]?.cached_path) {
+            playPath = check.rows[0].cached_path;
+            break;
+          }
+          const failed = await db.execute({
+            sql: `SELECT error FROM jobs WHERE video_id = ? AND status = 'failed' ORDER BY id DESC LIMIT 1`,
+            args: [song.video_id],
+          });
+          if (failed.rows.length > 0) {
+            return call.id_list_message([
+              { type: 'text', data: 'מצטערים, השיר אינו זמין להורדה כרגע' },
+            ]);
+          }
+        }
+      }
+
+      if (!playPath) {
+        return call.id_list_message([
+          { type: 'text', data: 'הכנת השיר לוקחת יותר זמן מהרגיל, נסו שוב בעוד דקה' },
+        ]);
+      }
+
       return call.id_list_message([
-        { type: 'text', data: `בחרתם ${safeTitle}, בשלב הבא נפעיל את ההשמעה` },
+        { type: 'file', data: playPath },
       ]);
     }
     if (choice === '3') {
