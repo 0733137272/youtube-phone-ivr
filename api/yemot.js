@@ -2,8 +2,17 @@ const express = require('express');
 const { YemotRouter } = require('yemot-router2');
 const { downloadRecording, deleteFile } = require('../lib/yemotApi');
 const { transcribeAudio } = require('../lib/groq');
+const { getDb, initDb, searchLocal } = require('../lib/db');
+const { resolveChannel, indexChannel } = require('../lib/youtube');
 
 const app = express();
+let dbReady = false;
+async function ensureDb() {
+  if (!dbReady && process.env.TURSO_DATABASE_URL && process.env.TURSO_AUTH_TOKEN) {
+    await initDb();
+    dbReady = true;
+  }
+}
 const router = YemotRouter({
   printLog: true,
   uncaughtErrorHandler: (error, call) => {
@@ -31,6 +40,37 @@ app.get('/api/debug', (req, res) => {
     return res.status(403).send('Forbidden');
   }
   res.json(lastDebug);
+});
+
+app.get('/api/admin/add-channel', async (req, res) => {
+  const secret = process.env.API_SECRET;
+  if (secret && req.query.key !== secret) {
+    return res.status(403).send('Forbidden');
+  }
+  const ch = req.query.channel;
+  if (!ch) return res.status(400).json({ error: 'Missing channel param' });
+  try {
+    await ensureDb();
+    const channel = await resolveChannel(process.env.YT_API_KEY, ch);
+    const count = await indexChannel(getDb(), process.env.YT_API_KEY, channel, Number(req.query.pages || 3));
+    res.json({ ok: true, channel: channel.display_name, channel_id: channel.channel_id, indexed_videos: count });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/search', async (req, res) => {
+  const secret = process.env.API_SECRET;
+  if (secret && req.query.key !== secret) {
+    return res.status(403).send('Forbidden');
+  }
+  try {
+    await ensureDb();
+    const results = await searchLocal(req.query.q || '');
+    res.json({ ok: true, results });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Secret check middleware for Yemot endpoint
@@ -96,10 +136,37 @@ router.get('/', async (call) => {
     ]);
   }
 
-  // Step 3 (M0): Read back the recognized text to verify accuracy
+  // Step 3 (M1): Search local Turso index
+  await ensureDb();
   const safeTranscript = transcript.replace(/[.:'"?!()\[\]{}&=]/g, ' ').replace(/\s+/g, ' ').trim();
+  const results = await searchLocal(transcript, 5);
+
+  if (results.length === 0) {
+    return call.id_list_message([
+      { type: 'text', data: `זיהיתי ${safeTranscript} אך לא נמצא שיר מתאים בערוצים המורשים` },
+    ]);
+  }
+
+  for (let i = 0; i < results.length; i++) {
+    const song = results[i];
+    const safeTitle = String(song.title).replace(/[.:'"?!()\[\]{}&=]/g, ' ').replace(/\s+/g, ' ').trim();
+    const choice = await call.read(
+      [{ type: 'text', data: `מצאתי ${safeTitle}, לאישור הקישו 1, לתוצאה הבאה הקישו 2, ליציאה הקישו 3` }],
+      'tap',
+      { max_digits: 1, min_digits: 1, digits_allowed: ['1', '2', '3'] }
+    );
+    if (choice === '1') {
+      return call.id_list_message([
+        { type: 'text', data: `בחרתם ${safeTitle}, בשלב הבא נפעיל את ההשמעה` },
+      ]);
+    }
+    if (choice === '3') {
+      return call.id_list_message([{ type: 'text', data: 'תודה ולהתראות' }]);
+    }
+  }
+
   return call.id_list_message([
-    { type: 'text', data: `זיהיתי שביקשתם ${safeTranscript}` },
+    { type: 'text', data: 'לא נותרות תוצאות נוספות, נסו לחפש שוב' },
   ]);
 });
 
