@@ -80,9 +80,10 @@ app.get('/api/admin/test-download', async (req, res) => {
     return res.status(403).send('Forbidden');
   }
   const videoId = req.query.video_id || 'Y30pfWIQfoo';
+  const useCookies = req.query.nocookies !== '1';
   try {
     await ensureDb();
-    const playPath = await processSong(videoId, process.env.YEMOT_TOKEN);
+    const playPath = await processSong(videoId, process.env.YEMOT_TOKEN, { useCookies });
     res.json({ ok: true, playPath });
   } catch (err) {
     res.status(500).json({ error: err.message });
