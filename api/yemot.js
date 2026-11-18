@@ -179,13 +179,9 @@ router.get('/', async (call) => {
           });
         }
 
-        // Poll up to 12 times (~60s) with short wait messages
-        for (let attempt = 0; attempt < 12; attempt++) {
-          await call.read(
-            [{ type: 'text', data: 'אנא המתינו, השיר בהכנה' }],
-            'tap',
-            { max_digits: 1, min_digits: 0, sec_wait: 4 }
-          );
+        // Poll silently on the server up to 6 times (~18s)
+        for (let attempt = 0; attempt < 6; attempt++) {
+          await new Promise((r) => setTimeout(r, 3000));
           const check = await db.execute({
             sql: `SELECT cached_path FROM videos WHERE video_id = ? LIMIT 1`,
             args: [song.video_id],
