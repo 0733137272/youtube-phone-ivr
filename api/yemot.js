@@ -82,6 +82,13 @@ app.use('/api/yemot', (req, res, next) => {
   next();
 });
 
+function sanitizeForTTS(str) {
+  return String(str || '')
+    .replace(/[^\u0590-\u05FFa-zA-Z0-9\s,]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 router.get('/', async (call) => {
   const token = process.env.YEMOT_TOKEN;
   const groqKey = process.env.GROQ_API_KEY;
@@ -138,7 +145,7 @@ router.get('/', async (call) => {
 
   // Step 3 (M1): Search local Turso index
   await ensureDb();
-  const safeTranscript = transcript.replace(/[.:'"?!()\[\]{}&=]/g, ' ').replace(/\s+/g, ' ').trim();
+  const safeTranscript = sanitizeForTTS(transcript);
   const results = await searchLocal(transcript, 5);
 
   if (results.length === 0) {
@@ -149,7 +156,7 @@ router.get('/', async (call) => {
 
   for (let i = 0; i < results.length; i++) {
     const song = results[i];
-    const safeTitle = String(song.title).replace(/[.:'"?!()\[\]{}&=]/g, ' ').replace(/\s+/g, ' ').trim();
+    const safeTitle = sanitizeForTTS(song.title);
     const choice = await call.read(
       [{ type: 'text', data: `מצאתי ${safeTitle}, לאישור הקישו 1, לתוצאה הבאה הקישו 2, ליציאה הקישו 3` }],
       'tap',
