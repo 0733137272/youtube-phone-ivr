@@ -14,6 +14,8 @@ const router = YemotRouter({
   },
 });
 
+let lastDebug = { recordingPath: null, error: null, at: null };
+
 // Simple health check
 app.get('/api/health', (req, res) => {
   res.json({
@@ -21,6 +23,14 @@ app.get('/api/health', (req, res) => {
     hasYemotToken: Boolean(process.env.YEMOT_TOKEN),
     hasGroqKey: Boolean(process.env.GROQ_API_KEY),
   });
+});
+
+app.get('/api/debug', (req, res) => {
+  const secret = process.env.API_SECRET;
+  if (secret && req.query.key !== secret) {
+    return res.status(403).send('Forbidden');
+  }
+  res.json(lastDebug);
 });
 
 // Secret check middleware for Yemot endpoint
@@ -61,6 +71,7 @@ router.get('/', async (call) => {
 
   // Step 2: Download from Yemot & transcribe with Groq Whisper
   let transcript = '';
+  lastDebug = { recordingPath, error: null, at: new Date().toISOString() };
   try {
     const audioBuffer = await downloadRecording(token, recordingPath);
     transcript = await transcribeAudio(
@@ -70,6 +81,7 @@ router.get('/', async (call) => {
     );
   } catch (err) {
     console.error('STT error:', err);
+    lastDebug.error = err.message;
     return call.id_list_message([
       { type: 'text', data: 'לא הצלחתי לפענח את ההקלטה כרגע, נסו שוב מאוחר יותר' },
     ]);
