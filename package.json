@@ -1,0 +1,17 @@
+{
+  "name": "youtube-phone-ivr",
+  "version": "0.1.0",
+  "description": "M0: Yemot HaMashiach + Groq Whisper STT proof of concept",
+  "main": "api/yemot.js",
+  "scripts": {
+    "start": "node api/yemot.js",
+    "dev": "node --watch api/yemot.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "yemot-router2": "*"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
