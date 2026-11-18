@@ -44,7 +44,7 @@ router.get('/', async (call) => {
 
   // Step 1: Record the caller's song request
   const recordingPath = await call.read(
-    [{ type: 'text', data: 'ברוכים הבאים. אמרו את שם השיר המבוקש ולאחר מכן הקישו סולמית' }],
+    [{ type: 'text', data: 'ברוכים הבאים, אמרו את שם השיר המבוקש ולאחר מכן הקישו סולמית' }],
     'record',
     {
       maxLength: 10,
@@ -85,8 +85,9 @@ router.get('/', async (call) => {
   }
 
   // Step 3 (M0): Read back the recognized text to verify accuracy
+  const safeTranscript = transcript.replace(/[.:'"?!()\[\]{}&=]/g, ' ').replace(/\s+/g, ' ').trim();
   return call.id_list_message([
-    { type: 'text', data: `זיהיתי שביקשתם: ${transcript}` },
+    { type: 'text', data: `זיהיתי שביקשתם ${safeTranscript}` },
   ]);
 });
 
