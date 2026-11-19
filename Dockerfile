@@ -12,6 +12,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install --omit=dev
 COPY . .
+RUN gzip -d -f /app/data/yutfri_index.db.gz
 
 EXPOSE 3000
 CMD ["npm", "start"]
