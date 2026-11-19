@@ -116,9 +116,9 @@ router.get('/', async (call) => {
     ]);
   }
 
-  // Step 1: Record the caller's song request
+  // Step 1: Record the caller's song request (plays recorded welcome guide /4/6/6/welcome if uploaded, plus clear instruction)
   const recordingPath = await call.read(
-    [{ type: 'text', data: 'ברוכים הבאים, אמרו את שם השיר המבוקש ולאחר מכן הקישו סולמית' }],
+    [{ type: 'file', data: '/4/6/6/welcome' }],
     'record',
     {
       maxLength: 10,
@@ -182,11 +182,12 @@ router.get('/', async (call) => {
     if (choice === '1') {
       const db = getDb();
       let playPath = song.cached_path;
+      const safeFileId = String(song.video_id).replace(/[^a-zA-Z0-9_]/g, '_');
 
       if (!playPath) {
         // Start background download/conversion if not already running
         const running = await db.execute({
-          sql: `SELECT id FROM jobs WHERE video_id = ? AND status = 'running' LIMIT 1`,
+          sql: `SELECT id FROM jobs WHERE video_id = ? AND status IN ('running', 'part1_ready') LIMIT 1`,
           args: [song.video_id],
         });
         if (running.rows.length === 0) {
@@ -195,17 +196,25 @@ router.get('/', async (call) => {
           });
         }
 
-        // Poll up to 5 rounds (~65s total): each round waits 12s silently on server, then plays a brief wait prompt with allow_empty: true (no "לא הוקשה בחירה")
-        for (let round = 0; round < 5 && !playPath; round++) {
-          if (round > 0) {
-            await call.read(
-              [{ type: 'text', data: 'אנא המתינו, השיר בהכנה' }],
-              'tap',
-              { max_digits: 1, sec_wait: 1, allow_empty: true, empty_val: '0' }
-            );
-          }
-          for (let attempt = 0; attempt < 4; attempt++) {
-            await new Promise((r) => setTimeout(r, 3000));
+        const waitFiles = [
+          '/4/6/6/wait1',
+          '/4/6/6/wait2',
+          '/4/6/6/wait3',
+        ];
+
+        let part1Ready = false;
+        for (let round = 0; round < 5 && !playPath && !part1Ready; round++) {
+          const waitFile = waitFiles[Math.min(round, waitFiles.length - 1)];
+          await call.read(
+            [
+              { type: 'file', data: waitFile },
+              { type: 'music_on_hold', data: { musicName: 'NigunRoshChodeshKislevB', maxSec: 6 } },
+            ],
+            'tap',
+            { max_digits: 1, sec_wait: 1, allow_empty: true, empty_val: '0' }
+          );
+
+          for (let attempt = 0; attempt < 2; attempt++) {
             const check = await db.execute({
               sql: `SELECT cached_path FROM videos WHERE video_id = ? LIMIT 1`,
               args: [song.video_id],
@@ -214,16 +223,48 @@ router.get('/', async (call) => {
               playPath = check.rows[0].cached_path;
               break;
             }
-            const failed = await db.execute({
-              sql: `SELECT error FROM jobs WHERE video_id = ? AND status = 'failed' ORDER BY id DESC LIMIT 1`,
+            const jobRes = await db.execute({
+              sql: `SELECT status FROM jobs WHERE video_id = ? ORDER BY id DESC LIMIT 1`,
               args: [song.video_id],
             });
-            if (failed.rows.length > 0) {
+            const jobStatus = jobRes.rows[0]?.status;
+            if (jobStatus === 'part1_ready' || jobStatus === 'done') {
+              part1Ready = true;
+              break;
+            }
+            if (jobStatus === 'failed') {
               return call.id_list_message([
                 { type: 'text', data: 'מצטערים, השיר אינו זמין להורדה כרגע' },
               ]);
             }
+            await new Promise((r) => setTimeout(r, 2000));
           }
+        }
+
+        // Fast-start playback: play first 40s immediately while the rest & full file finish uploading in background!
+        if (part1Ready && !playPath) {
+          const part1Path = `/4/6/6/songs/${safeFileId}_part1`;
+          const restPath = `/4/6/6/songs/${safeFileId}_rest`;
+
+          await call.read(
+            [{ type: 'file', data: part1Path }],
+            'tap',
+            { max_digits: 1, sec_wait: 1, allow_empty: true, empty_val: '0' }
+          );
+
+          // Wait briefly if _rest is still finishing its upload
+          for (let w = 0; w < 5; w++) {
+            const jobRes = await db.execute({
+              sql: `SELECT status FROM jobs WHERE video_id = ? ORDER BY id DESC LIMIT 1`,
+              args: [song.video_id],
+            });
+            if (jobRes.rows[0]?.status === 'done') break;
+            await new Promise((r) => setTimeout(r, 2000));
+          }
+
+          return call.id_list_message([
+            { type: 'file', data: restPath },
+          ]);
         }
       }
 
