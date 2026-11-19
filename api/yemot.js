@@ -208,7 +208,7 @@ router.get('/', async (call) => {
           await call.read(
             [
               { type: 'file', data: waitFile },
-              { type: 'music_on_hold', data: { musicName: 'NigunRoshChodeshKislevB', maxSec: 6 } },
+              { type: 'file', data: '/4/6/6/melody' },
             ],
             'tap',
             { max_digits: 1, sec_wait: 1, allow_empty: true, empty_val: '0' }
