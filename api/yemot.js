@@ -116,42 +116,72 @@ router.get('/', async (call) => {
     ]);
   }
 
-  // Step 1: Record the caller's song request (plays recorded welcome guide /4/6/6/welcome if uploaded, plus clear instruction)
-  const recordingPath = await call.read(
+  // Step 1: Choose voice search (1 or default after 2s) vs keypad typing (2)
+  const inputMode = await call.read(
     [{ type: 'file', data: '/4/6/6/welcome' }],
-    'record',
+    'tap',
     {
-      maxLength: 10,
-      minLength: 1,
-      playBeep: true,
+      max_digits: 1,
+      sec_wait: 2,
+      allow_empty: true,
+      empty_val: '1',
+      digits_allowed: ['1', '2'],
     }
   );
 
-  if (!recordingPath) {
-    return call.id_list_message([
-      { type: 'text', data: 'לא התקבלה הקלטה, אנא נסו שוב' },
-    ]);
-  }
-
-  // Step 2: Download from Yemot & transcribe with Groq Whisper
   let transcript = '';
-  lastDebug = { recordingPath, error: null, at: new Date().toISOString() };
-  try {
-    const audioBuffer = await downloadRecording(token, recordingPath);
-    transcript = await transcribeAudio(
-      audioBuffer,
-      groqKey,
-      'אברהם פריד, יעקב שוואקי, מרדכי בן דוד, ישי ריבו, חנן בן ארי'
+
+  if (inputMode === '2') {
+    // Keypad typing mode (HebrewKeyboard)
+    const typed = await call.read(
+      [{ type: 'file', data: '/4/6/6/type_prompt' }],
+      'tap',
+      {
+        typing_playback_mode: 'HebrewKeyboard',
+        min_digits: 2,
+        max_digits: 35,
+        sec_wait: 8,
+      }
     );
-  } catch (err) {
-    console.error('STT error:', err);
-    lastDebug.error = err.message;
-    return call.id_list_message([
-      { type: 'text', data: 'לא הצלחתי לפענח את ההקלטה כרגע, נסו שוב מאוחר יותר' },
-    ]);
-  } finally {
-    // Clean up recording from Yemot storage
-    deleteFile(token, recordingPath).catch(() => {});
+    transcript = String(typed || '').trim();
+    lastDebug = { recordingPath: 'HebrewKeyboard', transcript, error: null, at: new Date().toISOString() };
+  } else {
+    // Voice recording mode
+    const recordingPath = await call.read(
+      [{ type: 'file', data: '/4/6/6/record_prompt' }],
+      'record',
+      {
+        maxLength: 10,
+        minLength: 1,
+        playBeep: true,
+      }
+    );
+
+    if (!recordingPath) {
+      return call.id_list_message([
+        { type: 'text', data: 'לא התקבלה הקלטה, אנא נסו שוב' },
+      ]);
+    }
+
+    // Step 2: Download from Yemot & transcribe with Groq Whisper
+    lastDebug = { recordingPath, error: null, at: new Date().toISOString() };
+    try {
+      const audioBuffer = await downloadRecording(token, recordingPath);
+      transcript = await transcribeAudio(
+        audioBuffer,
+        groqKey,
+        'אברהם פריד, יעקב שוואקי, מרדכי בן דוד, ישי ריבו, חנן בן ארי'
+      );
+    } catch (err) {
+      console.error('STT error:', err);
+      lastDebug.error = err.message;
+      return call.id_list_message([
+        { type: 'text', data: 'לא הצלחתי לפענח את ההקלטה כרגע, נסו שוב מאוחר יותר' },
+      ]);
+    } finally {
+      // Clean up recording from Yemot storage
+      deleteFile(token, recordingPath).catch(() => {});
+    }
   }
 
   if (!transcript) {
