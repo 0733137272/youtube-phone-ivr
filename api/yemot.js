@@ -224,8 +224,9 @@ router.get('/', async (call) => {
         ]);
       }
 
+      const normalizedPlayPath = playPath.startsWith('/') ? playPath : `/${playPath}`;
       return call.id_list_message([
-        { type: 'file', data: playPath },
+        { type: 'file', data: normalizedPlayPath },
       ]);
     }
     if (choice === '3') {
