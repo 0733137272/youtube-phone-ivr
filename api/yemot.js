@@ -195,25 +195,34 @@ router.get('/', async (call) => {
           });
         }
 
-        // Poll silently on the server up to 6 times (~18s)
-        for (let attempt = 0; attempt < 6; attempt++) {
-          await new Promise((r) => setTimeout(r, 3000));
-          const check = await db.execute({
-            sql: `SELECT cached_path FROM videos WHERE video_id = ? LIMIT 1`,
-            args: [song.video_id],
-          });
-          if (check.rows[0]?.cached_path) {
-            playPath = check.rows[0].cached_path;
-            break;
+        // Poll up to 5 rounds (~65s total): each round waits 12s silently on server, then plays a brief wait prompt with allow_empty: true (no "לא הוקשה בחירה")
+        for (let round = 0; round < 5 && !playPath; round++) {
+          if (round > 0) {
+            await call.read(
+              [{ type: 'text', data: 'אנא המתינו, השיר בהכנה' }],
+              'tap',
+              { max_digits: 1, sec_wait: 1, allow_empty: true, empty_val: '0' }
+            );
           }
-          const failed = await db.execute({
-            sql: `SELECT error FROM jobs WHERE video_id = ? AND status = 'failed' ORDER BY id DESC LIMIT 1`,
-            args: [song.video_id],
-          });
-          if (failed.rows.length > 0) {
-            return call.id_list_message([
-              { type: 'text', data: 'מצטערים, השיר אינו זמין להורדה כרגע' },
-            ]);
+          for (let attempt = 0; attempt < 4; attempt++) {
+            await new Promise((r) => setTimeout(r, 3000));
+            const check = await db.execute({
+              sql: `SELECT cached_path FROM videos WHERE video_id = ? LIMIT 1`,
+              args: [song.video_id],
+            });
+            if (check.rows[0]?.cached_path) {
+              playPath = check.rows[0].cached_path;
+              break;
+            }
+            const failed = await db.execute({
+              sql: `SELECT error FROM jobs WHERE video_id = ? AND status = 'failed' ORDER BY id DESC LIMIT 1`,
+              args: [song.video_id],
+            });
+            if (failed.rows.length > 0) {
+              return call.id_list_message([
+                { type: 'text', data: 'מצטערים, השיר אינו זמין להורדה כרגע' },
+              ]);
+            }
           }
         }
       }
