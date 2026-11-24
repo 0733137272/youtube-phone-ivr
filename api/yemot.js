@@ -217,7 +217,7 @@ router.get('/', async (call) => {
       if (!playPath) {
         // Start background download/conversion if not already running
         const running = await db.execute({
-          sql: `SELECT id FROM jobs WHERE video_id = ? AND status IN ('running', 'part1_ready') LIMIT 1`,
+          sql: `SELECT id FROM jobs WHERE video_id = ? AND status = 'running' LIMIT 1`,
           args: [song.video_id],
         });
         if (running.rows.length === 0) {
@@ -226,24 +226,25 @@ router.get('/', async (call) => {
           });
         }
 
-        const waitFiles = [
-          '/4/6/6/wait1',
-          '/4/6/6/wait2',
-          '/4/6/6/wait3',
+        // Engaging countdown sequence: wait1 + melody -> count1 -> count2 -> count3
+        const waitSequence = [
+          ['/4/6/6/wait1', '/4/6/6/melody'],
+          ['/4/6/6/count1'],
+          ['/4/6/6/count2'],
+          ['/4/6/6/count3'],
+          ['/4/6/6/wait2', '/4/6/6/melody'],
+          ['/4/6/6/wait3'],
         ];
 
-        let part1Ready = false;
-        for (let round = 0; round < 5 && !playPath && !part1Ready; round++) {
-          const waitFile = waitFiles[Math.min(round, waitFiles.length - 1)];
+        for (let step = 0; step < waitSequence.length && !playPath; step++) {
+          const files = waitSequence[step].map((f) => ({ type: 'file', data: f }));
           await call.read(
-            [
-              { type: 'file', data: waitFile },
-              { type: 'file', data: '/4/6/6/melody' },
-            ],
+            files,
             'tap',
             { max_digits: 1, sec_wait: 1, allow_empty: true, empty_val: '0' }
           );
 
+          // Check DB if download & upload completed
           for (let attempt = 0; attempt < 2; attempt++) {
             const check = await db.execute({
               sql: `SELECT cached_path FROM videos WHERE video_id = ? LIMIT 1`,
@@ -258,43 +259,16 @@ router.get('/', async (call) => {
               args: [song.video_id],
             });
             const jobStatus = jobRes.rows[0]?.status;
-            if (jobStatus === 'part1_ready' || jobStatus === 'done') {
-              part1Ready = true;
-              break;
-            }
             if (jobStatus === 'failed') {
               return call.id_list_message([
                 { type: 'text', data: 'מצטערים, השיר אינו זמין להורדה כרגע' },
               ]);
             }
+            if (step < waitSequence.length - 1) {
+              break; // progress naturally with the spoken countdown steps
+            }
             await new Promise((r) => setTimeout(r, 2000));
           }
-        }
-
-        // Fast-start playback: play first 40s immediately while the rest & full file finish uploading in background!
-        if (part1Ready && !playPath) {
-          const part1Path = `/4/6/6/songs/${safeFileId}_part1`;
-          const restPath = `/4/6/6/songs/${safeFileId}_rest`;
-
-          await call.read(
-            [{ type: 'file', data: part1Path }],
-            'tap',
-            { max_digits: 1, sec_wait: 1, allow_empty: true, empty_val: '0' }
-          );
-
-          // Wait briefly if _rest is still finishing its upload
-          for (let w = 0; w < 5; w++) {
-            const jobRes = await db.execute({
-              sql: `SELECT status FROM jobs WHERE video_id = ? ORDER BY id DESC LIMIT 1`,
-              args: [song.video_id],
-            });
-            if (jobRes.rows[0]?.status === 'done') break;
-            await new Promise((r) => setTimeout(r, 2000));
-          }
-
-          return call.id_list_message([
-            { type: 'file', data: restPath },
-          ]);
         }
       }
 
