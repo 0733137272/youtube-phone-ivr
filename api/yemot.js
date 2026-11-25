@@ -67,8 +67,8 @@ app.get('/api/admin/search', async (req, res) => {
   }
   try {
     await ensureDb();
-    const results = await searchLocal(req.query.q || '');
-    res.json({ ok: true, results });
+    const searchRes = await searchLocal(req.query.q || '');
+    res.json({ ok: true, total: searchRes.totalCount, results: searchRes.results });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -193,95 +193,150 @@ router.get('/', async (call) => {
   // Step 3 (M1): Search local Turso index
   await ensureDb();
   const safeTranscript = sanitizeForTTS(transcript);
-  const results = await searchLocal(transcript, 5);
+  const { totalCount, results } = await searchLocal(transcript, 10);
 
-  if (results.length === 0) {
+  if (!results || results.length === 0) {
     return call.id_list_message([
       { type: 'text', data: `זיהיתי ${safeTranscript} אך לא נמצא שיר מתאים בערוצים המורשים` },
     ]);
   }
 
+  // Play a song helper
+  async function playSelectedSong(song) {
+    const db = getDb();
+    let playPath = song.cached_path;
+    const safeFileId = String(song.video_id).replace(/[^a-zA-Z0-9_]/g, '_');
+
+    if (!playPath) {
+      // Start background download/conversion if not already running
+      const running = await db.execute({
+        sql: `SELECT id FROM jobs WHERE video_id = ? AND status = 'running' LIMIT 1`,
+        args: [song.video_id],
+      });
+      if (running.rows.length === 0) {
+        processSong(song.video_id, token).catch((err) => {
+          console.error('Background processSong error:', err);
+        });
+      }
+
+      // Engaging countdown sequence: wait1 + melody -> count1 -> count2 -> count3
+      const waitSequence = [
+        ['/4/6/6/wait1', '/4/6/6/melody'],
+        ['/4/6/6/count1'],
+        ['/4/6/6/count2'],
+        ['/4/6/6/count3'],
+        ['/4/6/6/wait2', '/4/6/6/melody'],
+        ['/4/6/6/wait3'],
+      ];
+
+      for (let step = 0; step < waitSequence.length && !playPath; step++) {
+        const files = waitSequence[step].map((f) => ({ type: 'file', data: f }));
+        await call.read(
+          files,
+          'tap',
+          { max_digits: 1, sec_wait: 1, allow_empty: true, empty_val: '0' }
+        );
+
+        // Check DB if download & upload completed
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const check = await db.execute({
+            sql: `SELECT cached_path FROM videos WHERE video_id = ? LIMIT 1`,
+            args: [song.video_id],
+          });
+          if (check.rows[0]?.cached_path) {
+            playPath = check.rows[0].cached_path;
+            break;
+          }
+          const jobRes = await db.execute({
+            sql: `SELECT status FROM jobs WHERE video_id = ? ORDER BY id DESC LIMIT 1`,
+            args: [song.video_id],
+          });
+          const jobStatus = jobRes.rows[0]?.status;
+          if (jobStatus === 'failed') {
+            return call.id_list_message([
+              { type: 'text', data: 'מצטערים, השיר אינו זמין להורדה כרגע' },
+            ]);
+          }
+          if (step < waitSequence.length - 1) {
+            break; // progress naturally with the spoken countdown steps
+          }
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      }
+    }
+
+    if (!playPath) {
+      return call.id_list_message([
+        { type: 'text', data: 'הכנת השיר לוקחת יותר זמן מהרגיל, נסו שוב בעוד דקה' },
+      ]);
+    }
+
+    const normalizedPlayPath = playPath.startsWith('/') ? playPath : `/${playPath}`;
+    return call.id_list_message([
+      { type: 'file', data: normalizedPlayPath },
+    ]);
+  }
+
+  // Top result (best match)
+  const topSong = results[0];
+  const safeTopTitle = sanitizeForTTS(topSong.title);
+
+  // Ask caller: Play best match (1), listen to all results list (2), or step one by one (3)
+  const introPrompt = `נמצאו ${totalCount} תוצאות. התוצאה המובילה היא ${safeTopTitle}. להשמעת התוצאה המובילה הקישו 1. לרשימת התוצאות ובחירת מספר שיר הקישו 2. למעבר שיר שיר הקישו 3.`;
+  const mainChoice = await call.read(
+    [{ type: 'text', data: introPrompt }],
+    'tap',
+    { max_digits: 1, min_digits: 1, digits_allowed: ['1', '2', '3'] }
+  );
+
+  if (mainChoice === '1') {
+    return await playSelectedSong(topSong);
+  }
+
+  if (mainChoice === '2') {
+    // Read list of up to 10 results, allowing caller to dial the number at any time!
+    const listMessages = [
+      { type: 'text', data: 'הקשיבו לרשימת השירים, והקישו את מספר השיר לבחירה בכל עת:' },
+    ];
+    for (let j = 0; j < results.length; j++) {
+      const num = j + 1;
+      const title = sanitizeForTTS(results[j].title);
+      listMessages.push({ type: 'text', data: `מספר ${num}, ${title}.` });
+    }
+    listMessages.push({ type: 'text', data: 'אנא הקישו כעת את מספר השיר המבוקש, או כוכבית לחזרה.' });
+
+    const allowedDigits = results.map((_, idx) => String(idx + 1));
+    allowedDigits.push('*');
+
+    const listPick = await call.read(
+      listMessages,
+      'tap',
+      {
+        max_digits: results.length >= 10 ? 2 : 1,
+        min_digits: 1,
+        sec_wait: 6,
+      }
+    );
+
+    if (listPick && listPick !== '*') {
+      const pickedIndex = parseInt(listPick, 10) - 1;
+      if (pickedIndex >= 0 && pickedIndex < results.length) {
+        return await playSelectedSong(results[pickedIndex]);
+      }
+    }
+  }
+
+  // Option 3 or fallback: Navigate one by one
   for (let i = 0; i < results.length; i++) {
     const song = results[i];
     const safeTitle = sanitizeForTTS(song.title);
     const choice = await call.read(
-      [{ type: 'text', data: `מצאתי ${safeTitle}, לאישור הקישו 1, לתוצאה הבאה הקישו 2, ליציאה הקישו 3` }],
+      [{ type: 'text', data: `שיר ${i + 1} מתוך ${results.length}: ${safeTitle}. להשמעה הקישו 1, לתוצאה הבאה הקישו 2, ליציאה הקישו 3.` }],
       'tap',
       { max_digits: 1, min_digits: 1, digits_allowed: ['1', '2', '3'] }
     );
     if (choice === '1') {
-      const db = getDb();
-      let playPath = song.cached_path;
-      const safeFileId = String(song.video_id).replace(/[^a-zA-Z0-9_]/g, '_');
-
-      if (!playPath) {
-        // Start background download/conversion if not already running
-        const running = await db.execute({
-          sql: `SELECT id FROM jobs WHERE video_id = ? AND status = 'running' LIMIT 1`,
-          args: [song.video_id],
-        });
-        if (running.rows.length === 0) {
-          processSong(song.video_id, token).catch((err) => {
-            console.error('Background processSong error:', err);
-          });
-        }
-
-        // Engaging countdown sequence: wait1 + melody -> count1 -> count2 -> count3
-        const waitSequence = [
-          ['/4/6/6/wait1', '/4/6/6/melody'],
-          ['/4/6/6/count1'],
-          ['/4/6/6/count2'],
-          ['/4/6/6/count3'],
-          ['/4/6/6/wait2', '/4/6/6/melody'],
-          ['/4/6/6/wait3'],
-        ];
-
-        for (let step = 0; step < waitSequence.length && !playPath; step++) {
-          const files = waitSequence[step].map((f) => ({ type: 'file', data: f }));
-          await call.read(
-            files,
-            'tap',
-            { max_digits: 1, sec_wait: 1, allow_empty: true, empty_val: '0' }
-          );
-
-          // Check DB if download & upload completed
-          for (let attempt = 0; attempt < 2; attempt++) {
-            const check = await db.execute({
-              sql: `SELECT cached_path FROM videos WHERE video_id = ? LIMIT 1`,
-              args: [song.video_id],
-            });
-            if (check.rows[0]?.cached_path) {
-              playPath = check.rows[0].cached_path;
-              break;
-            }
-            const jobRes = await db.execute({
-              sql: `SELECT status FROM jobs WHERE video_id = ? ORDER BY id DESC LIMIT 1`,
-              args: [song.video_id],
-            });
-            const jobStatus = jobRes.rows[0]?.status;
-            if (jobStatus === 'failed') {
-              return call.id_list_message([
-                { type: 'text', data: 'מצטערים, השיר אינו זמין להורדה כרגע' },
-              ]);
-            }
-            if (step < waitSequence.length - 1) {
-              break; // progress naturally with the spoken countdown steps
-            }
-            await new Promise((r) => setTimeout(r, 2000));
-          }
-        }
-      }
-
-      if (!playPath) {
-        return call.id_list_message([
-          { type: 'text', data: 'הכנת השיר לוקחת יותר זמן מהרגיל, נסו שוב בעוד דקה' },
-        ]);
-      }
-
-      const normalizedPlayPath = playPath.startsWith('/') ? playPath : `/${playPath}`;
-      return call.id_list_message([
-        { type: 'file', data: normalizedPlayPath },
-      ]);
+      return await playSelectedSong(song);
     }
     if (choice === '3') {
       return call.id_list_message([{ type: 'text', data: 'תודה ולהתראות' }]);
@@ -289,7 +344,7 @@ router.get('/', async (call) => {
   }
 
   return call.id_list_message([
-    { type: 'text', data: 'לא נותרות תוצאות נוספות, נסו לחפש שוב' },
+    { type: 'text', data: 'לא נותרו תוצאות נוספות, נסו לחפש שוב' },
   ]);
 });
 
